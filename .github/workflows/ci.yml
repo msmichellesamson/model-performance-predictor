@@ -1,0 +1,418 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  PYTHON_VERSION: "3.11"
+  POETRY_VERSION: "1.6.1"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: model_performance_test
+          POSTGRES_USER: test_user
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Cache Poetry
+      uses: actions/cache@v3
+      with:
+        path: ~/.local
+        key: poetry-${{ runner.os }}-${{ env.POETRY_VERSION }}
+
+    - name: Install Poetry
+      uses: snok/install-poetry@v1
+      with:
+        version: ${{ env.POETRY_VERSION }}
+        virtualenvs-create: true
+        virtualenvs-in-project: true
+
+    - name: Cache Dependencies
+      uses: actions/cache@v3
+      with:
+        path: .venv
+        key: venv-${{ runner.os }}-${{ hashFiles('**/poetry.lock') }}
+        restore-keys: |
+          venv-${{ runner.os }}-
+
+    - name: Install Dependencies
+      run: poetry install --no-interaction
+
+    - name: Type Check
+      run: poetry run mypy src/
+
+    - name: Lint
+      run: |
+        poetry run ruff check src/
+        poetry run black --check src/
+
+    - name: Security Check
+      run: poetry run bandit -r src/
+
+    - name: Unit Tests
+      run: poetry run pytest tests/ -v --cov=src --cov-report=xml --cov-report=term
+      env:
+        DATABASE_URL: postgresql://test_user:test_password@localhost:5432/model_performance_test
+        REDIS_URL: redis://localhost:6379
+        ENVIRONMENT: test
+
+    - name: Integration Tests
+      run: poetry run pytest tests/integration/ -v --tb=short
+      env:
+        DATABASE_URL: postgresql://test_user:test_password@localhost:5432/model_performance_test
+        REDIS_URL: redis://localhost:6379
+        ENVIRONMENT: test
+
+    - name: Model Performance Tests
+      run: poetry run pytest tests/test_predictor.py -v --tb=short
+      env:
+        DATABASE_URL: postgresql://test_user:test_password@localhost:5432/model_performance_test
+        REDIS_URL: redis://localhost:6379
+        ENVIRONMENT: test
+
+    - name: Upload Coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  build:
+    needs: [test, security-scan]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Output image
+      id: image
+      run: |
+        echo "image=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}" >> $GITHUB_OUTPUT
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: "1.6.0"
+
+    - name: Terraform Format Check
+      run: terraform fmt -check -recursive terraform/
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init -backend=false
+
+    - name: Terraform Validate
+      run: |
+        cd terraform
+        terraform validate
+
+    - name: TFLint
+      uses: terraform-linters/setup-tflint@v3
+      with:
+        tflint_version: latest
+
+    - name: Run TFLint
+      run: |
+        cd terraform
+        tflint --init
+        tflint
+
+  terraform-security:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run tfsec
+      uses: aquasecurity/tfsec-action@v1.0.3
+      with:
+        soft_fail: false
+
+    - name: Run Checkov
+      uses: bridgecrewio/checkov-action@master
+      with:
+        directory: terraform/
+        framework: terraform
+        soft_fail: false
+
+  deploy-staging:
+    if: github.ref == 'refs/heads/develop'
+    needs: [build, terraform-validate, terraform-security]
+    runs-on: ubuntu-latest
+    environment: staging
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: "1.6.0"
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init \
+          -backend-config="organization=${{ secrets.TF_ORGANIZATION }}" \
+          -backend-config="workspaces=[{name=\"model-performance-predictor-staging\"}]"
+
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan \
+          -var="environment=staging" \
+          -var="project_id=${{ secrets.GCP_PROJECT_ID_STAGING }}" \
+          -var="region=us-central1" \
+          -var="image_tag=${{ github.sha }}" \
+          -out=tfplan
+
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply tfplan
+
+  deploy-production:
+    if: github.ref == 'refs/heads/main'
+    needs: [build, terraform-validate, terraform-security]
+    runs-on: ubuntu-latest
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: "1.6.0"
+        cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init \
+          -backend-config="organization=${{ secrets.TF_ORGANIZATION }}" \
+          -backend-config="workspaces=[{name=\"model-performance-predictor-production\"}]"
+
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan \
+          -var="environment=production" \
+          -var="project_id=${{ secrets.GCP_PROJECT_ID_PRODUCTION }}" \
+          -var="region=us-central1" \
+          -var="image_tag=${{ github.sha }}" \
+          -out=tfplan
+
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply tfplan
+
+  smoke-tests:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    needs: [deploy-staging, deploy-production]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set Environment
+      run: |
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          echo "BASE_URL=${{ secrets.PRODUCTION_BASE_URL }}" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=staging" >> $GITHUB_ENV
+          echo "BASE_URL=${{ secrets.STAGING_BASE_URL }}" >> $GITHUB_ENV
+        fi
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests pytest
+
+    - name: Health Check
+      run: |
+        python -c "
+        import requests
+        import sys
+        import time
+
+        url = '${{ env.BASE_URL }}/health'
+        max_retries = 30
+        
+        for i in range(max_retries):
+            try:
+                response = requests.get(url, timeout=10)
+                if response.status_code == 200:
+                    print(f'Health check passed: {response.json()}')
+                    sys.exit(0)
+            except Exception as e:
+                print(f'Attempt {i+1}/{max_retries}: {e}')
+            time.sleep(10)
+        
+        print('Health check failed after all retries')
+        sys.exit(1)
+        "
+
+    - name: API Smoke Tests
+      run: |
+        python -c "
+        import requests
+        import json
+
+        base_url = '${{ env.BASE_URL }}'
+        
+        # Test metrics endpoint
+        response = requests.get(f'{base_url}/metrics')
+        assert response.status_code == 200
+        print('✓ Metrics endpoint working')
+
+        # Test prediction endpoint with sample data
+        sample_data = {
+            'model_id': 'test-model',
+            'inference_latency_p95': 150.0,
+            'error_rate': 0.02,
+            'throughput_rps': 100.0,
+            'memory_usage_gb': 2.5,
+            'cpu_utilization': 0.65,
+            'feature_drift_score': 0.15,
+            'data_quality_score': 0.95
+        }
+        
+        response = requests.post(
+            f'{base_url}/predict/performance',
+            json=sample_data,
+            headers={'Content-Type': 'application/json'}
+        )
+        assert response.status_code == 200
+        result = response.json()
+        assert 'degradation_probability' in result
+        print('✓ Prediction endpoint working')
+        print(f'Sample prediction result: {result}')
+        "
+
+  notification:
+    if: always()
+    needs: [test, build, deploy-staging, deploy-production, smoke-tests]
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Notify on Success
+      if: ${{ needs.test.result == 'success' && needs.build.result == 'success' }}
+      run: |
+        echo "✅ CI/CD Pipeline completed successfully"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit: ${{ github.sha }}"
+        echo "Image: ${{ needs.build.outputs.image }}@${{ needs.build.outputs.digest }}"
+
+    - name: Notify on Failure
+      if: ${{ needs.test.result == 'failure' || needs.build.result == 'failure' }}
+      run: |
+        echo "❌ CI/CD Pipeline failed"
+        echo "Failed jobs:"
+        echo "- Tests: ${{ needs.test.result }}"
+        echo "- Build: ${{ needs.build.result }}"
+        echo "- Deploy Staging: ${{ needs.deploy-staging.result }}"
+        echo "- Deploy Production: ${{ needs.deploy-production.result }}"
+        exit 1
