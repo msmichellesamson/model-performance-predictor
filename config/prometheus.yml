@@ -1,0 +1,168 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'model-performance-monitor'
+    environment: 'production'
+
+rule_files:
+  - "rules/*.yml"
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
+      timeout: 10s
+      api_version: v2
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 5s
+    metrics_path: /metrics
+
+  - job_name: 'model-performance-api'
+    static_configs:
+      - targets: ['model-performance-api:8000']
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    metrics_path: /metrics
+    params:
+      format: ['prometheus']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: model-performance-api:8000
+
+  - job_name: 'postgres-exporter'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+)(:[0-9]+)?'
+        replacement: '${1}'
+
+  - job_name: 'redis-exporter'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: redis_instance
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+)(:[0-9]+)?'
+        replacement: '${1}'
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+
+  - job_name: 'model-metrics'
+    static_configs:
+      - targets: ['model-performance-api:8000']
+    scrape_interval: 5s
+    scrape_timeout: 3s
+    metrics_path: /model-metrics
+    honor_labels: true
+    relabel_configs:
+      - source_labels: [__meta_prometheus_job]
+        target_label: job
+        replacement: 'model-inference'
+      - source_labels: [model_name]
+        target_label: model
+      - source_labels: [model_version]
+        target_label: version
+
+  - job_name: 'drift-detector'
+    static_configs:
+      - targets: ['model-performance-api:8000']
+    scrape_interval: 30s
+    scrape_timeout: 15s
+    metrics_path: /drift-metrics
+    params:
+      include_features: ['true']
+    relabel_configs:
+      - source_labels: [dataset_name]
+        target_label: dataset
+      - source_labels: [feature_name]
+        target_label: feature
+
+  - job_name: 'performance-predictions'
+    static_configs:
+      - targets: ['model-performance-api:8000']
+    scrape_interval: 60s
+    scrape_timeout: 30s
+    metrics_path: /prediction-metrics
+    relabel_configs:
+      - source_labels: [prediction_horizon]
+        target_label: horizon
+      - source_labels: [confidence_level]
+        target_label: confidence
+
+  - job_name: 'blackbox-exporter'
+    static_configs:
+      - targets:
+          - http://model-performance-api:8000/health
+          - http://model-performance-api:8000/ready
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+    params:
+      module: [http_2xx]
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+remote_write:
+  - url: http://prometheus-remote-storage:9201/write
+    queue_config:
+      max_samples_per_send: 10000
+      max_shards: 200
+      capacity: 20000
+      batch_send_deadline: 5s
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'go_.*|process_.*|promhttp_.*'
+        action: drop
+      - source_labels: [job]
+        regex: 'prometheus'
+        action: drop
+
+remote_read:
+  - url: http://prometheus-remote-storage:9201/read
+    read_recent: true
+    required_matchers:
+      job: model-performance-api
+
+storage:
+  tsdb:
+    retention.time: 15d
+    retention.size: 10GB
+    wal-compression: true
+    path: /prometheus/data
