@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-performance-predictor
+  namespace: default
+  labels:
+    app: model-performance-predictor
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: model-performance-predictor
+  template:
+    metadata:
+      labels:
+        app: model-performance-predictor
+    spec:
+      containers:
+      - name: predictor
+        image: model-performance-predictor:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: REDIS_URL
+          value: "redis://redis-service:6379"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
