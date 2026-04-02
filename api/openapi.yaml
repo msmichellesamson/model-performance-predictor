@@ -1,0 +1,98 @@
+openapi: 3.0.3
+info:
+  title: Model Performance Predictor API
+  version: 1.0.0
+  description: Real-time ML model performance degradation prediction
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                  timestamp:
+                    type: string
+                  version:
+                    type: string
+  /predictions:
+    post:
+      summary: Predict model performance degradation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model_id:
+                  type: string
+                metrics:
+                  type: object
+                  properties:
+                    accuracy:
+                      type: number
+                    latency_p95:
+                      type: number
+                    error_rate:
+                      type: number
+      responses:
+        '200':
+          description: Performance prediction
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  degradation_risk:
+                    type: number
+                  confidence:
+                    type: number
+                  timestamp:
+                    type: string
+  /drift/detect:
+    post:
+      summary: Detect data/model drift
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                model_id:
+                  type: string
+                features:
+                  type: array
+                  items:
+                    type: number
+      responses:
+        '200':
+          description: Drift detection result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  drift_detected:
+                    type: boolean
+                  drift_score:
+                    type: number
+                  threshold:
+                    type: number
+  /metrics:
+    get:
+      summary: Prometheus metrics endpoint
+      responses:
+        '200':
+          description: Metrics in Prometheus format
+          content:
+            text/plain:
+              schema:
+                type: string
