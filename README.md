@@ -3,39 +3,13 @@
 Real-time ML model performance degradation prediction using inference metrics and drift detection.
 
 ## Features
-- **Performance Prediction**: ML-based degradation risk assessment
-- **Drift Detection**: Statistical drift detection for features and predictions
-- **Real-time Monitoring**: Prometheus metrics and alerting
-- **Caching**: Redis for fast metric lookups
-- **Production Ready**: Kubernetes deployment with proper observability
 
-## Architecture
-
-```
-┌─────────────┐    ┌──────────────┐    ┌─────────────┐
-│   Client    │───▶│  API Layer   │───▶│ Predictor   │
-└─────────────┘    └──────────────┘    └─────────────┘
-                           │                    │
-                           ▼                    ▼
-                   ┌──────────────┐    ┌─────────────┐
-                   │ Drift Engine │    │ Metrics DB  │
-                   └──────────────┘    └─────────────┘
-                           │                    │
-                           ▼                    ▼
-                   ┌──────────────┐    ┌─────────────┐
-                   │    Redis     │    │ Prometheus  │
-                   └──────────────┘    └─────────────┘
-```
-
-## API Documentation
-
-See [api/openapi.yaml](api/openapi.yaml) for complete API specification.
-
-### Key Endpoints
-- `POST /predictions` - Predict performance degradation
-- `POST /drift/detect` - Detect data/model drift
-- `GET /metrics` - Prometheus metrics
-- `GET /health` - Health check
+- **Performance Prediction**: Predicts model degradation using inference metrics
+- **Drift Detection**: Real-time feature and concept drift monitoring
+- **Circuit Breaker**: Automatic failover when models underperform
+- **Multi-layer Monitoring**: Latency, accuracy, data quality tracking
+- **Alert System**: Threshold-based alerting with multiple channels
+- **Production Ready**: Kubernetes deployment, observability, caching
 
 ## Quick Start
 
@@ -43,50 +17,85 @@ See [api/openapi.yaml](api/openapi.yaml) for complete API specification.
 # Start services
 docker-compose up -d
 
-# Check health
-curl http://localhost:8000/health
-
-# Predict degradation
-curl -X POST http://localhost:8000/predictions \
+# Run predictions
+curl -X POST http://localhost:8000/api/v1/predictions \
   -H "Content-Type: application/json" \
-  -d '{"model_id": "model-123", "metrics": {"accuracy": 0.95, "latency_p95": 250, "error_rate": 0.02}}'
+  -H "X-API-Key: dev-key" \
+  -d '{
+    "model_id": "fraud-detector-v2",
+    "metrics": {
+      "latency_p99": 250.0,
+      "error_rate": 0.02,
+      "throughput": 1500
+    }
+  }'
+```
+
+## Architecture
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│   Client    │───▶│  FastAPI     │───▶│ Predictor   │
+│             │    │  Gateway     │    │ Engine      │
+└─────────────┘    └──────────────┘    └─────────────┘
+                           │                    │
+                           ▼                    ▼
+                   ┌──────────────┐    ┌─────────────┐
+                   │  Monitoring  │    │   Redis     │
+                   │  Stack       │    │   Cache     │
+                   └──────────────┘    └─────────────┘
+                           │
+                           ▼
+                   ┌──────────────┐
+                   │ PostgreSQL   │
+                   │ Metrics DB   │
+                   └──────────────┘
+```
+
+## Technology Stack
+
+- **Backend**: Python, FastAPI, SQLAlchemy
+- **Database**: PostgreSQL, Redis
+- **Monitoring**: Prometheus, Grafana
+- **Infrastructure**: Docker, Kubernetes, Terraform
+- **ML**: scikit-learn, numpy, pandas
+
+## API Documentation
+
+See [API_GUIDE.md](docs/API_GUIDE.md) for comprehensive usage examples and troubleshooting.
+
+## Deployment
+
+### Local Development
+```bash
+docker-compose up -d
+python -m pytest tests/
+```
+
+### Kubernetes
+```bash
+kubectl apply -f k8s/
+```
+
+### Terraform (GCP)
+```bash
+cd terraform/
+terraform init
+terraform plan
+terraform apply
 ```
 
 ## Monitoring
 
-- **Prometheus**: http://localhost:9090
-- **Metrics**: http://localhost:8000/metrics
-- **Alerts**: Configured for degradation risk > 0.8
+- **Metrics**: http://localhost:9090 (Prometheus)
+- **Dashboards**: http://localhost:3000 (Grafana)
+- **API Health**: http://localhost:8000/api/v1/health
 
 ## Skills Demonstrated
 
-- **AI/ML**: Performance prediction models, drift detection algorithms
-- **Backend**: FastAPI, async processing, error handling
-- **Database**: PostgreSQL for metrics, Redis for caching
-- **Infrastructure**: Terraform, Kubernetes, Docker
-- **SRE**: Prometheus monitoring, health checks, observability
-- **DevOps**: CI/CD pipeline, containerization
-- **Data**: Real-time metrics processing, feature engineering
-
-## Development
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run tests
-pytest tests/
-
-# Run locally
-python src/main.py
-```
-
-## Deployment
-
-```bash
-# Deploy infrastructure
-cd terraform && terraform apply
-
-# Deploy to Kubernetes
-kubectl apply -f k8s/
-```
+- **ML**: Real-time model performance prediction, drift detection
+- **Backend**: FastAPI, microservices, distributed systems
+- **Database**: PostgreSQL optimization, Redis caching
+- **Infrastructure**: Kubernetes, Terraform, Docker
+- **SRE**: Prometheus monitoring, circuit breakers, alerting
+- **DevOps**: CI/CD, GitOps, container orchestration
