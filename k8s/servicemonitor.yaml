@@ -1,0 +1,31 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: model-performance-predictor
+  namespace: default
+  labels:
+    app: model-performance-predictor
+    prometheus: kube-prometheus
+spec:
+  selector:
+    matchLabels:
+      app: model-performance-predictor
+  endpoints:
+  - port: http
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+  - port: http
+    path: /api/v1/predictions/metrics
+    interval: 30s
+    scrapeTimeout: 10s
+    honorLabels: true
+    relabelings:
+    - sourceLabels: [__name__]
+      regex: 'model_(.*)'
+      targetLabel: 'model_metric'
+      replacement: '${1}'
+  namespaceSelector:
+    matchNames:
+    - default
