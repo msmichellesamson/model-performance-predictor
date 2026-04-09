@@ -2,55 +2,74 @@ import redis
 import logging
 import time
 from typing import Optional, Any
-from redis.connection import ConnectionPool
-from redis.exceptions import ConnectionError, TimeoutError
+from functools import wraps
 
 logger = logging.getLogger(__name__)
 
+def retry_redis_operation(max_retries: int = 3, delay: float = 0.1):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(self, *args, **kwargs)
+                except (redis.ConnectionError, redis.TimeoutError) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Redis operation failed (attempt {attempt + 1}/{max_retries}): {e}")
+                        time.sleep(delay * (2 ** attempt))  # Exponential backoff
+                    else:
+                        logger.error(f"Redis operation failed after {max_retries} attempts: {e}")
+            raise last_exception
+        return wrapper
+    return decorator
+
 class RedisClient:
-    def __init__(self, host: str = "localhost", port: int = 6379, db: int = 0, 
+    def __init__(self, host: str = 'localhost', port: int = 6379, db: int = 0, 
                  max_connections: int = 10, socket_timeout: int = 5):
-        self.pool = ConnectionPool(
-            host=host, port=port, db=db,
+        self.pool = redis.ConnectionPool(
+            host=host, 
+            port=port, 
+            db=db,
             max_connections=max_connections,
             socket_timeout=socket_timeout,
-            retry_on_timeout=True
+            socket_connect_timeout=socket_timeout,
+            health_check_interval=30
         )
-        self.client = redis.Redis(connection_pool=self.pool)
+        self.client = redis.Redis(connection_pool=self.pool, decode_responses=True)
         
-    def _retry_operation(self, operation, *args, max_retries: int = 3, **kwargs) -> Any:
-        """Retry Redis operations with exponential backoff"""
-        for attempt in range(max_retries):
-            try:
-                return operation(*args, **kwargs)
-            except (ConnectionError, TimeoutError) as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Redis operation failed after {max_retries} attempts: {e}")
-                    raise
-                
-                wait_time = 2 ** attempt  # Exponential backoff
-                logger.warning(f"Redis operation failed (attempt {attempt + 1}), retrying in {wait_time}s")
-                time.sleep(wait_time)
+    @retry_redis_operation()
+    def get(self, key: str) -> Optional[str]:
+        """Get value from Redis with retry logic"""
+        return self.client.get(key)
     
-    def get(self, key: str) -> Optional[bytes]:
-        """Get value with retry logic"""
-        return self._retry_operation(self.client.get, key)
-    
+    @retry_redis_operation()
     def set(self, key: str, value: Any, ex: Optional[int] = None) -> bool:
-        """Set value with retry logic"""
-        return self._retry_operation(self.client.set, key, value, ex=ex)
+        """Set value in Redis with retry logic"""
+        return self.client.set(key, value, ex=ex)
     
+    @retry_redis_operation()
     def delete(self, key: str) -> int:
-        """Delete key with retry logic"""
-        return self._retry_operation(self.client.delete, key)
+        """Delete key from Redis with retry logic"""
+        return self.client.delete(key)
     
-    def ping(self) -> bool:
-        """Health check with retry logic"""
+    @retry_redis_operation()
+    def exists(self, key: str) -> bool:
+        """Check if key exists in Redis with retry logic"""
+        return bool(self.client.exists(key))
+    
+    def health_check(self) -> bool:
+        """Check Redis connection health"""
         try:
-            return self._retry_operation(self.client.ping)
-        except Exception:
+            self.client.ping()
+            return True
+        except Exception as e:
+            logger.error(f"Redis health check failed: {e}")
             return False
     
     def close(self):
         """Close connection pool"""
-        self.pool.disconnect()
+        if self.pool:
+            self.pool.disconnect()
+            logger.info("Redis connection pool closed")
