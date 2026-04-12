@@ -1,75 +1,77 @@
 import redis
 import logging
 import time
-from typing import Optional, Any
-from functools import wraps
+from typing import Optional, Dict, Any
+from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-def retry_redis_operation(max_retries: int = 3, delay: float = 0.1):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            last_exception = None
-            for attempt in range(max_retries):
-                try:
-                    return func(self, *args, **kwargs)
-                except (redis.ConnectionError, redis.TimeoutError) as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Redis operation failed (attempt {attempt + 1}/{max_retries}): {e}")
-                        time.sleep(delay * (2 ** attempt))  # Exponential backoff
-                    else:
-                        logger.error(f"Redis operation failed after {max_retries} attempts: {e}")
-            raise last_exception
-        return wrapper
-    return decorator
-
 class RedisClient:
-    def __init__(self, host: str = 'localhost', port: int = 6379, db: int = 0, 
-                 max_connections: int = 10, socket_timeout: int = 5):
+    def __init__(self, host: str = 'localhost', port: int = 6379, 
+                 max_connections: int = 10, retry_attempts: int = 3):
         self.pool = redis.ConnectionPool(
-            host=host, 
-            port=port, 
-            db=db,
+            host=host, port=port, 
             max_connections=max_connections,
-            socket_timeout=socket_timeout,
-            socket_connect_timeout=socket_timeout,
-            health_check_interval=30
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5
         )
-        self.client = redis.Redis(connection_pool=self.pool, decode_responses=True)
-        
-    @retry_redis_operation()
-    def get(self, key: str) -> Optional[str]:
-        """Get value from Redis with retry logic"""
-        return self.client.get(key)
+        self.retry_attempts = retry_attempts
+        self._client = None
     
-    @retry_redis_operation()
-    def set(self, key: str, value: Any, ex: Optional[int] = None) -> bool:
-        """Set value in Redis with retry logic"""
-        return self.client.set(key, value, ex=ex)
+    @property
+    def client(self) -> redis.Redis:
+        if self._client is None:
+            self._client = redis.Redis(connection_pool=self.pool)
+        return self._client
     
-    @retry_redis_operation()
-    def delete(self, key: str) -> int:
-        """Delete key from Redis with retry logic"""
-        return self.client.delete(key)
+    def _retry_operation(self, operation, *args, **kwargs):
+        """Retry Redis operations with exponential backoff"""
+        for attempt in range(self.retry_attempts):
+            try:
+                return operation(*args, **kwargs)
+            except (redis.ConnectionError, redis.TimeoutError) as e:
+                if attempt == self.retry_attempts - 1:
+                    logger.error(f"Redis operation failed after {self.retry_attempts} attempts: {e}")
+                    raise
+                wait_time = 2 ** attempt
+                logger.warning(f"Redis operation failed, retrying in {wait_time}s: {e}")
+                time.sleep(wait_time)
     
-    @retry_redis_operation()
-    def exists(self, key: str) -> bool:
-        """Check if key exists in Redis with retry logic"""
-        return bool(self.client.exists(key))
+    def get_metrics(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """Get cached model metrics with retry logic"""
+        key = f"metrics:{model_id}"
+        try:
+            data = self._retry_operation(self.client.get, key)
+            return eval(data) if data else None
+        except Exception as e:
+            logger.error(f"Failed to get metrics for {model_id}: {e}")
+            return None
+    
+    def cache_prediction(self, model_id: str, features_hash: str, 
+                        prediction: Dict[str, Any], ttl: int = 300) -> bool:
+        """Cache prediction with automatic expiration and retry"""
+        key = f"prediction:{model_id}:{features_hash}"
+        try:
+            self._retry_operation(
+                self.client.setex, key, ttl, str(prediction)
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to cache prediction: {e}")
+            return False
     
     def health_check(self) -> bool:
         """Check Redis connection health"""
         try:
-            self.client.ping()
+            self._retry_operation(self.client.ping)
             return True
         except Exception as e:
             logger.error(f"Redis health check failed: {e}")
             return False
     
     def close(self):
-        """Close connection pool"""
+        """Clean up connection pool"""
         if self.pool:
             self.pool.disconnect()
             logger.info("Redis connection pool closed")
