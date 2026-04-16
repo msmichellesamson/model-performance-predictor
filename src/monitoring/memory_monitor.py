@@ -1,70 +1,102 @@
 import logging
+import time
+from typing import Dict, List, Optional
 import psutil
-from typing import Dict, Optional
-from prometheus_client import Gauge, Counter
+from dataclasses import dataclass
+from threading import Lock
 
 logger = logging.getLogger(__name__)
 
-# Prometheus metrics
-memory_usage_gauge = Gauge('model_memory_usage_bytes', 'Memory usage during inference', ['model_id', 'version'])
-memory_threshold_exceeded = Counter('memory_threshold_exceeded_total', 'Memory threshold violations', ['model_id', 'version'])
+@dataclass
+class MemoryMetrics:
+    timestamp: float
+    used_mb: float
+    available_mb: float
+    percent: float
+    process_rss_mb: float
 
 class MemoryMonitor:
-    """Monitors memory usage during model inference operations."""
+    """Monitors memory usage with batch processing for efficiency."""
     
-    def __init__(self, threshold_mb: float = 1024.0):
-        self.threshold_bytes = threshold_mb * 1024 * 1024
-        self.baseline_memory: Optional[float] = None
-        logger.info(f"Memory monitor initialized with threshold: {threshold_mb}MB")
+    def __init__(self, batch_size: int = 10, flush_interval: float = 30.0):
+        self.batch_size = batch_size
+        self.flush_interval = flush_interval
+        self.metrics_batch: List[MemoryMetrics] = []
+        self.last_flush = time.time()
+        self._lock = Lock()
     
-    def start_monitoring(self, model_id: str, version: str) -> Dict[str, float]:
-        """Start memory monitoring for inference session."""
-        try:
-            process = psutil.Process()
-            memory_info = process.memory_info()
-            
-            current_memory = memory_info.rss
-            if self.baseline_memory is None:
-                self.baseline_memory = current_memory
-            
-            # Calculate memory increase from baseline
-            memory_delta = current_memory - self.baseline_memory
-            
-            # Update Prometheus metrics
-            memory_usage_gauge.labels(model_id=model_id, version=version).set(current_memory)
-            
-            # Check threshold violation
-            if memory_delta > self.threshold_bytes:
-                memory_threshold_exceeded.labels(model_id=model_id, version=version).inc()
-                logger.warning(
-                    f"Memory threshold exceeded: {memory_delta / 1024 / 1024:.2f}MB "
-                    f"(threshold: {self.threshold_bytes / 1024 / 1024:.2f}MB)"
-                )
-            
-            return {
-                'current_memory_mb': current_memory / 1024 / 1024,
-                'memory_delta_mb': memory_delta / 1024 / 1024,
-                'threshold_exceeded': memory_delta > self.threshold_bytes
-            }
-            
-        except psutil.Error as e:
-            logger.error(f"Failed to monitor memory: {e}")
-            return {'error': str(e)}
-    
-    def get_memory_stats(self) -> Dict[str, float]:
-        """Get current system memory statistics."""
+    def collect_metrics(self) -> MemoryMetrics:
+        """Collect current memory metrics."""
         try:
             memory = psutil.virtual_memory()
-            return {
-                'total_mb': memory.total / 1024 / 1024,
-                'available_mb': memory.available / 1024 / 1024,
-                'used_percent': memory.percent
-            }
-        except psutil.Error as e:
-            logger.error(f"Failed to get memory stats: {e}")
-            return {'error': str(e)}
+            process = psutil.Process()
+            process_memory = process.memory_info()
+            
+            metrics = MemoryMetrics(
+                timestamp=time.time(),
+                used_mb=memory.used / 1024 / 1024,
+                available_mb=memory.available / 1024 / 1024,
+                percent=memory.percent,
+                process_rss_mb=process_memory.rss / 1024 / 1024
+            )
+            
+            self._add_to_batch(metrics)
+            return metrics
+            
+        except Exception as e:
+            logger.error(f"Failed to collect memory metrics: {e}")
+            raise
     
-    def reset_baseline(self):
-        """Reset memory baseline for new monitoring session."""
-        self.baseline_memory = None
-        logger.info("Memory baseline reset")
+    def _add_to_batch(self, metrics: MemoryMetrics) -> None:
+        """Add metrics to batch and flush if needed."""
+        with self._lock:
+            self.metrics_batch.append(metrics)
+            
+            should_flush = (
+                len(self.metrics_batch) >= self.batch_size or
+                time.time() - self.last_flush >= self.flush_interval
+            )
+            
+            if should_flush:
+                self._flush_batch()
+    
+    def _flush_batch(self) -> None:
+        """Process and clear the current batch."""
+        if not self.metrics_batch:
+            return
+            
+        try:
+            # Calculate batch statistics
+            avg_memory_percent = sum(m.percent for m in self.metrics_batch) / len(self.metrics_batch)
+            max_process_rss = max(m.process_rss_mb for m in self.metrics_batch)
+            
+            logger.info(f"Memory batch processed: {len(self.metrics_batch)} samples, "
+                       f"avg_memory_percent={avg_memory_percent:.2f}, "
+                       f"max_process_rss={max_process_rss:.2f}MB")
+            
+            self.metrics_batch.clear()
+            self.last_flush = time.time()
+            
+        except Exception as e:
+            logger.error(f"Failed to flush memory metrics batch: {e}")
+            self.metrics_batch.clear()
+    
+    def get_current_usage(self) -> Dict[str, float]:
+        """Get current memory usage summary."""
+        try:
+            memory = psutil.virtual_memory()
+            process = psutil.Process()
+            
+            return {
+                'memory_percent': memory.percent,
+                'process_rss_mb': process.memory_info().rss / 1024 / 1024,
+                'available_gb': memory.available / 1024 / 1024 / 1024
+            }
+        except Exception as e:
+            logger.error(f"Failed to get current memory usage: {e}")
+            return {}
+    
+    def force_flush(self) -> None:
+        """Force flush current batch."""
+        with self._lock:
+            self._flush_batch()
