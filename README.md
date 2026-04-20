@@ -9,9 +9,10 @@ don't have ground-truth labels at serving time — you only get the user's
 implicit feedback (regenerate, abandon, thumbs-down) days later. By then, your
 top-of-funnel metrics have already moved.
 
-The Anthropic Claude system cards repeatedly note that model behaviour can
-shift across deployments, fine-tunes, and prompt changes. OpenAI's GPT-4 system
-card discusses similar drift around tool use and refusals. Both labs invest
+The [Anthropic Claude 3 model card](https://www-cdn.anthropic.com/de8ba9b01c9ab7cbabf5c33b80b7bbc618857627/Model_Card_Claude_3.pdf)
+repeatedly notes that model behaviour can shift across deployments,
+fine-tunes, and prompt changes. OpenAI's [GPT-4 system card](https://cdn.openai.com/papers/gpt-4-system-card.pdf)
+discusses similar drift around tool use and refusals. Both labs invest
 heavily in evals — but evals run periodically, not continuously, and they
 don't tell you about drift between eval runs.
 
@@ -83,7 +84,8 @@ features are real but the validation isn't honest yet.
 
 ## References
 
-- Anthropic, *Claude 3 Model Card* and ongoing system cards (2024)
-- OpenAI, *GPT-4 System Card* (2023)
-- Liang et al., *Holistic Evaluation of Language Models (HELM)* (2022)
-- Guo et al., *On Calibration of Modern Neural Networks* (ICML 2017)
+- Anthropic, [*Claude 3 Model Card*](https://www-cdn.anthropic.com/de8ba9b01c9ab7cbabf5c33b80b7bbc618857627/Model_Card_Claude_3.pdf) (2024)
+- OpenAI, [*GPT-4 System Card*](https://cdn.openai.com/papers/gpt-4-system-card.pdf) (2023)
+- Liang et al., [*Holistic Evaluation of Language Models (HELM)*](https://arxiv.org/abs/2211.09110) (2022)
+- Guo et al., [*On Calibration of Modern Neural Networks*](https://arxiv.org/abs/1706.04599) (ICML 2017)
+- [Arize Phoenix](https://github.com/Arize-ai/phoenix) — open-source LLM observability with similar feature ideas
